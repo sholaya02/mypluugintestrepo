@@ -1,0 +1,133 @@
+pipeline {
+    agent any
+
+    environment {
+        // Define environment variables here
+        KUBECONFIG = credentials('kubeconfig-credentials-id')
+        APP_NAME = 'my-app'
+        NAMESPACE = 'my-namespace'
+        DOCKER_IMAGE = 'my-app-image:latest'
+        DEPLOYMENT_NAME = 'my-app-deployment'
+        CHECKMARX_DAST_API = credentials('checkmarx-dast-api-key')
+    }
+
+    stages {
+        stage('Checkout SCM') {
+            steps {
+                // Checkout source code from SCM
+                checkout scm
+            }
+        }
+
+        stage('Build Artifact') {
+            steps {
+                // Build the application artifact
+                script {
+                    sh 'mvn clean package' // or the appropriate command for your build tool
+                }
+            }
+        }
+
+        stage('Build Docker Image') {
+            steps {
+                // Build Docker image
+                script {
+                    sh "docker build -t ${DOCKER_IMAGE} ."
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                // Push Docker image to registry
+                script {
+                    sh "docker push ${DOCKER_IMAGE}"
+                }
+            }
+        }
+
+        stage('Deploy to Kubernetes') {
+            steps {
+                // Deploy application to Kubernetes
+                script {
+                    sh """
+                    kubectl --kubeconfig=${KUBECONFIG} -n ${NAMESPACE} set image deployment/${DEPLOYMENT_NAME} ${APP_NAME}=${DOCKER_IMAGE}
+                    kubectl --kubeconfig=${KUBECONFIG} -n ${NAMESPACE} rollout status deployment/${DEPLOYMENT_NAME}
+                    """
+                }
+            }
+        }
+
+        stage('Checkmarx DAST Scan') {
+            steps ("Docker Pull"){
+                script{
+                    sh """
+                     docker pull checkmarx/dast:latest
+                     """
+
+            }
+        }
+
+        stage("Run DAST"){
+            script{
+                git credentialsId: 'github_creds', url: 'https://github.com/CheckmarxDev/dast-demo-env'
+                ret = sh(
+                    script:
+                    """ 
+                    docker run -v \$(pwd)/dast-config:/tmp/config -v \$(pwd)/output:/output -e CX_APIKEY=$API_KEY --user 0 checkmarx/dast:latest \
+
+                    web --base-url=https://deu.ast.checkmarx.net/ --timeout=10000 --log-level=info --verbose \
+
+                    --config=/tmp/config/zap_config.yaml --environment-id=49e32846-7455-407c-aed6-be17dfe1632e \
+
+                    --fail-on high --output /output 
+                    """
+
+                , returnStatus: true)
+
+                if(ret != 0){ 
+
+                    currentBuild.result = 'FAILED' 
+
+                    return 
+
+                }
+
+            }
+
+        }
+
+    
+        }
+
+        stage('Post-Deployment Tests') {
+            steps {
+                // Run any post-deployment tests or health checks
+                script {
+                    sh "curl -f http://your-app-url/health || exit 1"
+                }
+            }
+        }
+    
+
+     post {
+        always {
+            // Cleanup steps
+            cleanWs()
+        }
+
+        failure {
+            // Notify on failure
+            mail to: 'team@example.com',
+                 subject: "Build failed in Jenkins: ${currentBuild.fullDisplayName}",
+                 body: "Something is wrong with the build. Please check the Jenkins logs."
+        }
+
+        success {
+            // Notify on success
+            mail to: 'team@example.com',
+                 subject: "Build succeeded in Jenkins: ${currentBuild.fullDisplayName}",
+                 body: "The build was successful. The application has been deployed."
+        }
+    }
+}
